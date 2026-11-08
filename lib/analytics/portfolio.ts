@@ -7,6 +7,12 @@ export interface PortfolioTrade {
   timestamp: number;
 }
 
+export interface PortfolioValuationSnapshot {
+  timestamp: number;
+  value: number;
+  netCashFlow?: number;
+}
+
 export interface PortfolioPerformance {
   currentValue: number;
   totalInvested: number;
@@ -14,7 +20,8 @@ export interface PortfolioPerformance {
   unrealizedPnL: number;
   totalPnL: number;
   roi: number;
-  timeWeightedReturn: number;
+  timeWeightedReturn: number | null;
+  twrAvailable: boolean;
   history: Array<{
     timestamp: number;
     value: number;
@@ -45,6 +52,49 @@ export function calculateTimeWeightedReturn(periodReturns: number[]): number {
 }
 
 /**
+ * Calculate Time-Weighted Return (TWR %) from chronological valuation snapshots
+ * at subperiod boundaries, removing the effect of external net cash flows.
+ * Returns null when fewer than 2 valid chronological snapshots are available.
+ */
+export function calculateTWRFromSnapshots(
+  snapshots?: PortfolioValuationSnapshot[],
+): number | null {
+  if (!snapshots || snapshots.length < 2) {
+    return null;
+  }
+
+  const sorted = [...snapshots].sort((a, b) => a.timestamp - b.timestamp);
+  const periodReturns: number[] = [];
+
+  for (let i = 1; i < sorted.length; i += 1) {
+    const prev = sorted[i - 1];
+    const curr = sorted[i];
+    const startValue = prev.value;
+    const endValue = curr.value;
+    const netCashFlow = curr.netCashFlow ?? 0;
+
+    if (
+      !Number.isFinite(startValue) ||
+      !Number.isFinite(endValue) ||
+      !Number.isFinite(netCashFlow) ||
+      startValue <= 0
+    ) {
+      return null;
+    }
+
+    const periodEndBeforeCashFlow = endValue - netCashFlow;
+    if (periodEndBeforeCashFlow < 0) {
+      return null;
+    }
+
+    const subperiodReturn = (periodEndBeforeCashFlow - startValue) / startValue;
+    periodReturns.push(subperiodReturn);
+  }
+
+  return calculateTimeWeightedReturn(periodReturns);
+}
+
+/**
  * Compute realized/unrealized P&L, ROI, TWR, and HODL benchmark from a trade ledger.
  */
 export function computePortfolioFromTrades(
@@ -52,6 +102,7 @@ export function computePortfolioFromTrades(
   currentPrices: Record<string, number>,
   hodlEntryPrice = 0.1,
   hodlCurrentPrice = 0.12,
+  valuationSnapshots?: PortfolioValuationSnapshot[],
 ): PortfolioPerformance {
   const holdings: Record<string, { qty: number; costBasis: number; realized: number }> = {};
 
@@ -102,7 +153,7 @@ export function computePortfolioFromTrades(
 
   const totalPnL = realizedPnL + unrealizedPnL;
   const roi = totalInvested > 0 ? (totalPnL / totalInvested) * 100 : 0;
-  const twr = calculateTimeWeightedReturn([roi / 200, roi / 200]);
+  const twr = calculateTWRFromSnapshots(valuationSnapshots);
 
   const hodlRoi = hodlEntryPrice > 0 ? ((hodlCurrentPrice - hodlEntryPrice) / hodlEntryPrice) * 100 : 0;
   const hodlValue = totalInvested * (1 + hodlRoi / 100);
@@ -115,6 +166,7 @@ export function computePortfolioFromTrades(
     totalPnL: Number(totalPnL.toFixed(2)),
     roi: Number(roi.toFixed(2)),
     timeWeightedReturn: twr,
+    twrAvailable: twr !== null,
     history: [
       { timestamp: Date.now() - 86_400_000, value: Number(totalInvested.toFixed(2)), pnl: 0 },
       { timestamp: Date.now(), value: Number(currentValue.toFixed(2)), pnl: Number(totalPnL.toFixed(2)) },
@@ -131,6 +183,7 @@ export function computePortfolioFromTrades(
 export async function calculatePortfolioPerformance(
   walletAddress: string,
   startDate: Date,
+  valuationSnapshots?: PortfolioValuationSnapshot[],
 ): Promise<PortfolioPerformance> {
   if (!walletAddress) {
     throw new Error('walletAddress is required');
@@ -139,5 +192,11 @@ export async function calculatePortfolioPerformance(
     { asset: 'XLM', side: 'buy', quantity: 10_000, price: 0.1, feeUSD: 1, timestamp: startDate.getTime() },
     { asset: 'USDC', side: 'buy', quantity: 500, price: 1.0, feeUSD: 0.5, timestamp: startDate.getTime() },
   ];
-  return computePortfolioFromTrades(sampleTrades, { XLM: 0.14, USDC: 1.0 }, 0.1, 0.12);
+  return computePortfolioFromTrades(
+    sampleTrades,
+    { XLM: 0.14, USDC: 1.0 },
+    0.1,
+    0.12,
+    valuationSnapshots,
+  );
 }
